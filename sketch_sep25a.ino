@@ -3,6 +3,62 @@
 #include <HTTPClient.h>
 #include "esp_camera.h"
 
+// Send settings
+const char* WEBHOOK_URL = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
+
+// Low-quality (fast) settings
+const framesize_t LOW_FRAMESIZE = FRAMESIZE_QVGA; // or FRAMESIZE_QQVGA
+const int LOW_JPEG_QUALITY = 30; // bigger = lower quality (arduino-esp: 0..63, lower = better)
+const camera_fb_location_t LOW_FB_LOCATION = CAMERA_FB_IN_DRAM; // prefer DRAM for speed
+
+// High-quality (send) settings
+const framesize_t HIGH_FRAMESIZE = FRAMESIZE_VGA;
+const int HIGH_JPEG_QUALITY = 4;
+const camera_fb_location_t HIGH_FB_LOCATION = CAMERA_FB_IN_PSRAM; // PSRAM for large frame
+
+// Timing and threshold
+const unsigned long LOW_INTERVAL_MS = 1000; // time between cheap captures
+const uint32_t MOTION_THRESHOLD = 15; // percent-ish or MAD-based threshold (tune)
+
+// ================== Camera Config Profiles ==================
+camera_config_t lowConfig;
+camera_config_t highConfig;
+
+void initConfigs() {
+  // Low config
+  lowConfig.ledc_channel = LEDC_CHANNEL_0;
+  lowConfig.ledc_timer   = LEDC_TIMER_0;
+  lowConfig.pin_pwdn     = -1;
+  lowConfig.pin_reset    = -1;
+  lowConfig.pin_xclk     = 15;
+  lowConfig.pin_sccb_sda = 4;
+  lowConfig.pin_sccb_scl = 5;
+  lowConfig.pin_d0       = 11;
+  lowConfig.pin_d1       = 9;
+  lowConfig.pin_d2       = 8;
+  lowConfig.pin_d3       = 10;
+  lowConfig.pin_d4       = 12;
+  lowConfig.pin_d5       = 18;
+  lowConfig.pin_d6       = 17;
+  lowConfig.pin_d7       = 16;
+  lowConfig.pin_vsync    = 6;
+  lowConfig.pin_href     = 7;
+  lowConfig.pin_pclk     = 13;
+  lowConfig.xclk_freq_hz = 20000000;
+  lowConfig.pixel_format = PIXFORMAT_JPEG;
+  lowConfig.frame_size   = LOW_FRAMESIZE;
+  lowConfig.fb_location  = LOW_FB_LOCATION;
+  lowConfig.jpeg_quality = LOW_JPEG_QUALITY;
+  lowConfig.fb_count     = 1;
+
+  // High config
+  highConfig = lowConfig; // copy from lowConfig to highConfig
+  highConfig.frame_size   = HIGH_FRAMESIZE;
+  highConfig.fb_location  = HIGH_FB_LOCATION;
+  highConfig.jpeg_quality = HIGH_JPEG_QUALITY;
+}
+
+
 // ================== WiFi Module ==================
 class WiFiModule
 {
@@ -11,7 +67,7 @@ public:
 
   void init()
   {
-    Serial.begin(921600);
+    Serial.begin(115200);
     if (!wm.autoConnect("ESP32-Setup", "12345678"))
     {
       Serial.println("Failed to connect, running AP mode");
@@ -50,7 +106,7 @@ public:
   void sendText(const String &content)
   {
     HTTPClient http;
-    String webhook_url = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
+    String webhook_url = WEBHOOK_URL;
 
     http.begin(webhook_url);
     http.addHeader("Content-Type", "application/json");
@@ -66,7 +122,7 @@ public:
     else
     {
       Serial.print("Error: ");
-      Serial.println(http.errorToString(httpResponseCode).c_str());
+      Serial.println(http.errorToString(httpResponseCode));
     }
 
     http.end();
@@ -78,7 +134,7 @@ public:
       return;
 
     HTTPClient http;
-    String webhook_url = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
+    String webhook_url = WEBHOOK_URL;
     String boundary = "----esp32formboundary"; // custom boundary for multipart request
 
     http.begin(webhook_url);
@@ -122,7 +178,8 @@ public:
     }
     else
     {
-      Serial.printf("Upload failed, error: %s\n", http.errorToString(code).c_str());
+      Serial.print("Upload failed, error: ");
+      Serial.println(http.errorToString(code));
     }
 
     http.end();
@@ -135,39 +192,8 @@ class CameraModule
 public:
   bool initialized = false;
 
-  void init()
+  bool init(camera_config_t &config)
   {
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
-
-    config.pin_pwdn = -1;
-    config.pin_reset = -1;
-    config.pin_xclk = 15;
-    config.pin_sccb_sda = 4;
-    config.pin_sccb_scl = 5;
-
-    config.pin_d0 = 11;
-    config.pin_d1 = 9;
-    config.pin_d2 = 8;
-    config.pin_d3 = 10;
-    config.pin_d4 = 12;
-    config.pin_d5 = 18;
-    config.pin_d6 = 17;
-    config.pin_d7 = 16;
-
-    config.pin_vsync = 6;
-    config.pin_href = 7;
-    config.pin_pclk = 13;
-
-    config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_JPEG;
-
-    config.frame_size = FRAMESIZE_VGA;
-    config.fb_location = CAMERA_FB_IN_PSRAM; // PSRAM
-    config.jpeg_quality = 2;
-    config.fb_count = 1;
-
     Serial.println("Calling esp_camera_init...");
     esp_err_t err = esp_camera_init(&config);
     if (err == ESP_OK)
@@ -180,6 +206,7 @@ public:
       Serial.printf("Camera init FAIL, error 0x%x\n", err);
       initialized = false;
     }
+    return initialized;
   }
 
   camera_fb_t *capture()
@@ -205,7 +232,14 @@ void setup()
 {
   wifi.init();
   discord.init();
-  camera.init();
+  initConfigs();
+
+  if (!psramFound()) {
+    Serial.println("PSRAM not found, falling back to DRAM");
+    highConfig.fb_location = CAMERA_FB_IN_DRAM;
+  }
+  
+  camera.init(highConfig);
 
   delay(5000); // Wi-Fi stabilize
 
