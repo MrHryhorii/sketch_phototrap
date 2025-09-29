@@ -6,56 +6,51 @@
 // Send settings
 const char* WEBHOOK_URL = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
 
-// Low-quality (fast) settings
-const framesize_t LOW_FRAMESIZE = FRAMESIZE_QVGA; // or FRAMESIZE_QQVGA
-const int LOW_JPEG_QUALITY = 30; // bigger = lower quality (arduino-esp: 0..63, lower = better)
-const camera_fb_location_t LOW_FB_LOCATION = CAMERA_FB_IN_DRAM; // prefer DRAM for speed
-
-// High-quality (send) settings
-const framesize_t HIGH_FRAMESIZE = FRAMESIZE_VGA;
-const int HIGH_JPEG_QUALITY = 4;
-const camera_fb_location_t HIGH_FB_LOCATION = CAMERA_FB_IN_PSRAM; // PSRAM for large frame
-
 // Timing and threshold
-const unsigned long LOW_INTERVAL_MS = 1000; // time between cheap captures
-const uint32_t MOTION_THRESHOLD = 15; // percent-ish or MAD-based threshold (tune)
+const unsigned long CAPTURE_INTERVAL = 1000; // extra pause ms between captures
 
-// ================== Camera Config Profiles ==================
-camera_config_t lowConfig;
-camera_config_t highConfig;
+// Threshold for motion detection: 
+// smaller value = more sensitive (reacts to small changes)
+// larger value  = less sensitive (reacts only to big changes)
+const uint32_t MOTION_THRESHOLD = 10;
 
-void initConfigs() {
-  // Low config
-  lowConfig.ledc_channel = LEDC_CHANNEL_0;
-  lowConfig.ledc_timer   = LEDC_TIMER_0;
-  lowConfig.pin_pwdn     = -1;
-  lowConfig.pin_reset    = -1;
-  lowConfig.pin_xclk     = 15;
-  lowConfig.pin_sccb_sda = 4;
-  lowConfig.pin_sccb_scl = 5;
-  lowConfig.pin_d0       = 11;
-  lowConfig.pin_d1       = 9;
-  lowConfig.pin_d2       = 8;
-  lowConfig.pin_d3       = 10;
-  lowConfig.pin_d4       = 12;
-  lowConfig.pin_d5       = 18;
-  lowConfig.pin_d6       = 17;
-  lowConfig.pin_d7       = 16;
-  lowConfig.pin_vsync    = 6;
-  lowConfig.pin_href     = 7;
-  lowConfig.pin_pclk     = 13;
-  lowConfig.xclk_freq_hz = 20000000;
-  lowConfig.pixel_format = PIXFORMAT_JPEG;
-  lowConfig.frame_size   = LOW_FRAMESIZE;
-  lowConfig.fb_location  = LOW_FB_LOCATION;
-  lowConfig.jpeg_quality = LOW_JPEG_QUALITY;
-  lowConfig.fb_count     = 1;
+// ================== Camera Config Profile ==================
+camera_config_t config;
 
-  // High config
-  highConfig = lowConfig; // copy from lowConfig to highConfig
-  highConfig.frame_size   = HIGH_FRAMESIZE;
-  highConfig.fb_location  = HIGH_FB_LOCATION;
-  highConfig.jpeg_quality = HIGH_JPEG_QUALITY;
+void initConfig()
+{
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_pwdn     = -1;
+  config.pin_reset    = -1;
+  config.pin_xclk     = 15;
+  config.pin_sccb_sda = 4;
+  config.pin_sccb_scl = 5;
+  config.pin_d0       = 11;
+  config.pin_d1       = 9;
+  config.pin_d2       = 8;
+  config.pin_d3       = 10;
+  config.pin_d4       = 12;
+  config.pin_d5       = 18;
+  config.pin_d6       = 17;
+  config.pin_d7       = 16;
+  config.pin_vsync    = 6;
+  config.pin_href     = 7;
+  config.pin_pclk     = 13;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.fb_count     = 1;
+
+  if (psramFound())
+  {
+    config.frame_size  = FRAMESIZE_VGA;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.jpeg_quality = 10;
+  } else {
+    config.frame_size  = FRAMESIZE_QVGA;
+    config.fb_location = CAMERA_FB_IN_DRAM;
+    config.jpeg_quality = 15;
+  }
 }
 
 
@@ -106,9 +101,8 @@ public:
   void sendText(const String &content)
   {
     HTTPClient http;
-    String webhook_url = WEBHOOK_URL;
 
-    http.begin(webhook_url);
+    http.begin(WEBHOOK_URL);
     http.addHeader("Content-Type", "application/json");
 
     String payload = "{\"content\":\"" + content + "\"}";
@@ -134,10 +128,9 @@ public:
       return;
 
     HTTPClient http;
-    String webhook_url = WEBHOOK_URL;
     String boundary = "----esp32formboundary"; // custom boundary for multipart request
 
-    http.begin(webhook_url);
+    http.begin(WEBHOOK_URL);
     http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
 
     // ---- Prepare multipart body ----
@@ -223,47 +216,131 @@ public:
   }
 };
 
+// ================== Motion Detector Module ==================
+class MotionDetector
+{
+private:
+  bool hasReference = false;
+  uint32_t referenceValue = 0;
+
+  // compress image buffer to a single average value
+  uint32_t compress(const uint8_t *buf, size_t len)
+  {
+    uint32_t sum = 0;
+    size_t count = 0;
+
+    // sample every 32nd byte for speed
+    for (size_t i = 0; i < len; i += 32)
+    {
+      sum += buf[i];
+      count++;
+    }
+
+    return (count > 0) ? (sum / count) : 0;
+  }
+
+public:
+  // initialize baseline
+  void init(const uint8_t *buf, size_t len)
+  {
+    referenceValue = compress(buf, len);
+    hasReference = true;
+  }
+
+  // compare new frame to baseline
+  bool compare(const uint8_t *buf, size_t len, uint32_t threshold)
+  {
+    uint32_t current = compress(buf, len);
+
+    if (!hasReference)
+    {
+      referenceValue = current;
+      hasReference = true;
+      return false; // nothing to compare yet
+    }
+
+    uint32_t diff = (current > referenceValue) ? 
+                    (current - referenceValue) : 
+                    (referenceValue - current);
+
+    // always update baseline then gradual changes won’t trigger
+    referenceValue = current;
+
+    return diff > threshold;
+  }
+};
+
+
 // ================== Main Program ==================
 WiFiModule wifi;
 DiscordModule discord;
 CameraModule camera;
+// Timing
+unsigned long lastCapture = 0;
+// Motion detector
+MotionDetector detector;
 
 void setup()
 {
   wifi.init();
   discord.init();
-  initConfigs();
 
-  if (!psramFound()) {
-    Serial.println("PSRAM not found, falling back to DRAM");
-    highConfig.fb_location = CAMERA_FB_IN_DRAM;
-  }
-  
-  camera.init(highConfig);
+  initConfig();
+  camera.init(config);
 
-  delay(5000); // Wi-Fi stabilize
-
-  if (WiFi.status() == WL_CONNECTED && camera.initialized)
+  // Wi-Fi stabilize
+  while (WiFi.status() != WL_CONNECTED) 
   {
-    camera_fb_t *fb = camera.capture();
-    if (fb)
-    {
-      String msg = "Photo captured! Size: " + String(fb->len) + " bytes (" +
-                   String(fb->width) + "x" + String(fb->height) + ")";
-      Serial.println(msg);
-      discord.sendText(msg);
-      discord.sendImage(fb->buf, fb->len);
-      camera.release(fb);
-    }
-    else
-    {
-      discord.sendText("Failed to capture image!");
-    }
+    delay(500);
+    Serial.print(".");
+  } 
+
+  if (!camera.initialized)
+  {
+    Serial.println("Camera not initialized, skipping capture");
+    return;
+  }
+
+  camera_fb_t *fb = camera.capture();
+  if (fb)
+  {
+    String msg = "Photo captured! Size: " + String(fb->len) + " bytes (" +
+                String(fb->width) + "x" + String(fb->height) + ")";
+    Serial.println(msg);
+    discord.sendText(msg);
+    discord.sendImage(fb->buf, fb->len);
+
+    // init Motion Detector
+    detector.init(fb->buf, fb->len);
+
+    camera.release(fb);
+  }
+  else
+  {
+    discord.sendText("Failed to capture image!");
   }
 }
 
 void loop()
 {
+  // --- Update modules ---
   wifi.update();
   discord.update();
+
+  // --- Timing for capture ---
+  if (millis() - lastCapture < CAPTURE_INTERVAL) return;
+  lastCapture = millis();
+  // --- Capture frame ---
+  camera_fb_t *fb = camera.capture();
+  if (!fb) return;
+  // --- Motion detection ---
+  bool motion = detector.compare(fb->buf, fb->len, MOTION_THRESHOLD);
+  if (motion)
+  {
+    Serial.println("Motion detected!");
+    discord.sendText("Motion detected!");
+    discord.sendImage(fb->buf, fb->len);
+  }
+  // release frame buffer always
+  camera.release(fb);
 }
