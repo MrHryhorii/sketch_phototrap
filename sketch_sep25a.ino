@@ -3,6 +3,9 @@
 #include <HTTPClient.h>
 #include "esp_camera.h"
 
+#include "img_converters.h"
+#include "esp_heap_caps.h"
+
 // Send settings
 const char* WEBHOOK_URL = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
 
@@ -12,7 +15,7 @@ const unsigned long CAPTURE_INTERVAL = 1000; // extra pause ms between captures
 // Threshold for motion detection: 
 // smaller value = more sensitive (reacts to small changes)
 // larger value  = less sensitive (reacts only to big changes)
-const uint32_t MOTION_THRESHOLD = 10;
+const uint32_t MOTION_THRESHOLD = 3;
 
 // ================== Camera Config Profile ==================
 camera_config_t config;
@@ -221,52 +224,92 @@ class MotionDetector
 {
 private:
   bool hasReference = false;
-  uint32_t referenceValue = 0;
+  std::vector<uint8_t> reference;
+  int blocksX, blocksY;
 
-  // compress image buffer to a single average value
-  uint32_t compress(const uint8_t *buf, size_t len)
+  std::vector<uint8_t> compress(const camera_fb_t *fb)
   {
-    uint32_t sum = 0;
-    size_t count = 0;
-
-    // sample every 32nd byte for speed
-    for (size_t i = 0; i < len; i += 32)
+    int pixelStep = 1;
+    // JPEG to RGB888
+    size_t out_len = fb->width * fb->height * 3;
+    uint8_t *rgb = (uint8_t*)heap_caps_malloc(out_len, MALLOC_CAP_8BIT);
+    if (!rgb) return {};
+    if (!fmt2rgb888(fb->buf, fb->len, fb->format, rgb))
     {
-      sum += buf[i];
-      count++;
+      free(rgb);
+      return {};
     }
+    // matrix of average brightness per block
+    std::vector<uint8_t> blocks(blocksX * blocksY, 0);
+    // block size in pixels
+    int bw = fb->width  / blocksX;
+    int bh = fb->height / blocksY;
 
-    return (count > 0) ? (sum / count) : 0;
+    // go through all blocks vertically
+    for (int by = 0; by < blocksY; by++)
+      // go through all blocks horizontally
+      for (int bx = 0; bx < blocksX; bx++)
+      {
+        // sum of grayscale values
+        uint32_t sum = 0;
+        // number of pixels in this block
+        int pxCount = 0;
+        // loop pixels inside block (rows)
+        for (int y = 0; y < bh; y += pixelStep)
+        {
+          // row start in full image
+          int yy = (by * bh + y) * fb->width;
+          // loop pixels inside block (cols)
+          for (int x = 0; x < bw; x += pixelStep)
+          {
+            // pixel index (RGB888 to 3 bytes)
+            int idx = (yy + bx * bw + x) * 3;
+            uint8_t r = rgb[idx], g = rgb[idx+1], b = rgb[idx+2];
+            sum += (r * 30 + g * 59 + b * 11) / 100; // grayscale
+            pxCount++;
+          }
+        }
+        // save avg brightness of this block
+        blocks[by * blocksX + bx] = sum / pxCount;
+      }
+
+    free(rgb);
+    return blocks;
   }
 
 public:
-  // initialize baseline
-  void init(const uint8_t *buf, size_t len)
+  MotionDetector(int bx = 12, int by = 8) : blocksX(bx), blocksY(by) {}
+
+  void init(const camera_fb_t *fb)
   {
-    referenceValue = compress(buf, len);
-    hasReference = true;
+    reference = compress(fb);
+    hasReference = !reference.empty();
   }
 
-  // compare new frame to baseline
-  bool compare(const uint8_t *buf, size_t len, uint32_t threshold)
+  bool compare(const camera_fb_t *fb, uint32_t threshold)
   {
-    uint32_t current = compress(buf, len);
+    auto current = compress(fb);
+    if (current.empty()) return false;
 
     if (!hasReference)
     {
-      referenceValue = current;
+      reference = current;
       hasReference = true;
-      return false; // nothing to compare yet
+      return false;
     }
 
-    uint32_t diff = (current > referenceValue) ? 
-                    (current - referenceValue) : 
-                    (referenceValue - current);
+    // is there motion?
+    bool triggered = false;
+    for (size_t i = 0; i < current.size(); i++) {
+        int diff = abs((int)current[i] - (int)reference[i]);
+        if (diff > (int)threshold) {
+            triggered = true; // movement found in this block
+            break;
+        }
+    }
 
-    // always update baseline then gradual changes won’t trigger
-    referenceValue = current;
-
-    return diff > threshold;
+    reference = current; // update for next frame
+    return triggered;    // result of check
   }
 };
 
@@ -277,6 +320,7 @@ DiscordModule discord;
 CameraModule camera;
 // Timing
 unsigned long lastCapture = 0;
+int motionCount = 0; // global counter
 // Motion detector
 MotionDetector detector;
 
@@ -311,7 +355,7 @@ void setup()
     discord.sendImage(fb->buf, fb->len);
 
     // init Motion Detector
-    detector.init(fb->buf, fb->len);
+    detector.init(fb);
 
     camera.release(fb);
   }
@@ -334,11 +378,13 @@ void loop()
   camera_fb_t *fb = camera.capture();
   if (!fb) return;
   // --- Motion detection ---
-  bool motion = detector.compare(fb->buf, fb->len, MOTION_THRESHOLD);
+  bool motion = detector.compare(fb, MOTION_THRESHOLD);
   if (motion)
   {
-    Serial.println("Motion detected!");
-    discord.sendText("Motion detected!");
+    motionCount++;
+    String msg = "Motion detected! #" + String(motionCount);
+    Serial.println(msg);
+    discord.sendText(msg);
     discord.sendImage(fb->buf, fb->len);
   }
   // release frame buffer always
