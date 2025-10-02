@@ -6,8 +6,7 @@
 #include "img_converters.h"
 #include "esp_heap_caps.h"
 
-// Send settings
-const char* WEBHOOK_URL = "https://discord.com/api/webhooks/1417920471592079360/q2cZ47f8lfYEjiucKH9maS7IBV57DyHPLhPrnY0CQJxxK_ZIqmne98x20Lg9zGgA41tY";
+#include <Preferences.h>
 
 // Timing and threshold
 const unsigned long CAPTURE_INTERVAL = 1000; // extra pause ms between captures
@@ -62,20 +61,63 @@ class WiFiModule
 {
 public:
   WiFiManager wm;
+  Preferences prefs;
+
+  // Custom parameters
+  WiFiManagerParameter webhookParam;
+
+  WiFiModule()
+  : webhookParam("webhook", "Discord Webhook URL", "", 256) // id, placeholder, default, length
+  {}
 
   void init()
   {
     Serial.begin(115200);
+
+    // load saved webhook
+    prefs.begin("config", true);
+    String saved = prefs.getString("webhook", "");
+    prefs.end();
+    if (saved.length() > 0)
+    {
+      webhookParam.setValue(saved.c_str(), saved.length());
+    }
+
+    // Attach custom parameter
+    wm.addParameter(&webhookParam);
+
+    // Try connect
     if (!wm.autoConnect("ESP32-Setup", "12345678"))
     {
       Serial.println("Failed to connect, running AP mode");
+      return;
     }
-    else
+
+    // Save params
+    prefs.begin("config", false);
+    prefs.putString("webhook", webhookParam.getValue());
+    prefs.end();
+
+    // check if webhook is set
+    String webhookNow = getWebhook();
+    if (webhookNow.length() == 0)
     {
+      Serial.println("Webhook not set! Staying in AP mode...");
+      delay(1000);
+      wm.startConfigPortal("ESP32-Setup", "12345678"); // force AP until user fills in
+    } else {
       Serial.println("Connected to Wi-Fi!");
       Serial.print("IP: ");
       Serial.println(WiFi.localIP());
     }
+  }
+  // Get Preferences
+  String getWebhook()
+  {
+    prefs.begin("config", true);
+    String saved = prefs.getString("webhook", "");
+    prefs.end();
+    return saved;
   }
 
   void update()
@@ -88,9 +130,13 @@ public:
 class DiscordModule
 {
 public:
+  String webhook;
   bool messageSent = false;
 
-  void init() {}
+  void init(const String &webhookUrl)
+  {
+    webhook = webhookUrl;
+  }
 
   void update()
   {
@@ -105,7 +151,7 @@ public:
   {
     HTTPClient http;
 
-    http.begin(WEBHOOK_URL);
+    http.begin(webhook);
     http.addHeader("Content-Type", "application/json");
 
     String payload = "{\"content\":\"" + content + "\"}";
@@ -133,7 +179,7 @@ public:
     HTTPClient http;
     String boundary = "----esp32formboundary"; // custom boundary for multipart request
 
-    http.begin(WEBHOOK_URL);
+    http.begin(webhook);
     http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
 
     // ---- Prepare multipart body ----
@@ -326,8 +372,10 @@ MotionDetector detector;
 
 void setup()
 {
+  pinMode(0, INPUT_PULLUP); // on reset button allow to change settings
+
   wifi.init();
-  discord.init();
+  discord.init(wifi.getWebhook());
 
   initConfig();
   camera.init(config);
@@ -370,6 +418,14 @@ void loop()
   // --- Update modules ---
   wifi.update();
   discord.update();
+
+  // --- Set Up mode ---
+  if (digitalRead(0) == LOW)
+  {
+    Serial.println("Button pressed!");
+    wifi.wm.startConfigPortal("ESP32-Setup", "12345678");
+    ESP.restart();
+  }
 
   // --- Timing for capture ---
   if (millis() - lastCapture < CAPTURE_INTERVAL) return;
