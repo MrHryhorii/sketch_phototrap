@@ -9,12 +9,12 @@
 #include <Preferences.h>
 
 // Timing and threshold
-const unsigned long CAPTURE_INTERVAL = 1000; // extra pause ms between captures
+unsigned long CAPTURE_INTERVAL = 1000;  // ms between captures
+uint32_t MOTION_THRESHOLD = 3;          // motion sensitivity threshold
+int PIXEL_CHECK = 1;                    // how many pixels check per line in a block (1 - minimum; bigger = faster)
+// Discord
+String DISCORD_WEBHOOK = "";            // Discord webhook URL
 
-// Threshold for motion detection: 
-// smaller value = more sensitive (reacts to small changes)
-// larger value  = less sensitive (reacts only to big changes)
-const uint32_t MOTION_THRESHOLD = 3;
 
 // ================== Camera Config Profile ==================
 camera_config_t config;
@@ -41,7 +41,7 @@ void initConfig()
   config.pin_pclk     = 13;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.fb_count     = 1;
+  config.fb_count     = 2;
 
   if (psramFound())
   {
@@ -63,65 +63,79 @@ public:
   WiFiManager wm;
   Preferences prefs;
 
-  // Custom parameters
+  // Custom parameters for configuration portal
   WiFiManagerParameter webhookParam;
+  WiFiManagerParameter intervalParam;
+  WiFiManagerParameter thresholdParam;
 
   WiFiModule()
-  : webhookParam("webhook", "Discord Webhook URL", "", 256) // id, placeholder, default, length
+  : webhookParam("webhook", "Discord Webhook URL", "", 256),
+    intervalParam("interval", "Capture Interval (ms)", "1000", 10),
+    thresholdParam("threshold", "Motion Threshold", "3", 5)
   {}
 
   void init()
   {
-    Serial.begin(115200);
-
-    // load saved webhook
+    // ---- Load saved parameters from NVS ----
     prefs.begin("config", true);
-    String saved = prefs.getString("webhook", "");
+    String savedWebhook  = prefs.getString("webhook", "");
+    int savedInterval    = prefs.getInt("interval", 1000);
+    int savedThreshold   = prefs.getInt("threshold", 3);
     prefs.end();
-    if (saved.length() > 0)
-    {
-      webhookParam.setValue(saved.c_str(), saved.length());
-    }
 
-    // Attach custom parameter
+    // Fill the portal fields with stored values
+    if (savedWebhook.length() > 0)
+      webhookParam.setValue(savedWebhook.c_str(), savedWebhook.length());
+
+    String sInterval = String(savedInterval);
+    intervalParam.setValue(sInterval.c_str(), sInterval.length());
+
+    String sThreshold = String(savedThreshold);
+    thresholdParam.setValue(sThreshold.c_str(), sThreshold.length());
+
+    // Add parameters to WiFiManager portal
     wm.addParameter(&webhookParam);
+    wm.addParameter(&intervalParam);
+    wm.addParameter(&thresholdParam);
 
-    // Try connect
+    // ---- Try Wi-Fi connection or start AP portal ----
     if (!wm.autoConnect("ESP32-Setup", "12345678"))
     {
       Serial.println("Failed to connect, running AP mode");
       return;
     }
 
-    // Save params
+    // ---- Save new parameters into NVS ----
     prefs.begin("config", false);
     prefs.putString("webhook", webhookParam.getValue());
+    prefs.putInt("interval", String(intervalParam.getValue()).toInt());
+    prefs.putInt("threshold", String(thresholdParam.getValue()).toInt());
     prefs.end();
 
-    // check if webhook is set
-    String webhookNow = getWebhook();
-    if (webhookNow.length() == 0)
-    {
-      Serial.println("Webhook not set! Staying in AP mode...");
-      delay(1000);
-      wm.startConfigPortal("ESP32-Setup", "12345678"); // force AP until user fills in
-    } else {
-      Serial.println("Connected to Wi-Fi!");
-      Serial.print("IP: ");
-      Serial.println(WiFi.localIP());
-    }
-  }
-  // Get Preferences
-  String getWebhook()
-  {
-    prefs.begin("config", true);
-    String saved = prefs.getString("webhook", "");
-    prefs.end();
-    return saved;
+    // ---- Update global variables ----
+    CAPTURE_INTERVAL = String(intervalParam.getValue()).toInt();
+    MOTION_THRESHOLD = String(thresholdParam.getValue()).toInt();
+    DISCORD_WEBHOOK  = String(webhookParam.getValue());
+
+    // ---- Sanity checks ----
+    if (CAPTURE_INTERVAL < 100) CAPTURE_INTERVAL = 100;   // prevent zero or too small interval
+    if (MOTION_THRESHOLD < 1)   MOTION_THRESHOLD = 1;     // prevent zero threshold
+
+    // ---- Debug info ----
+    Serial.println("Connected to Wi-Fi!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Interval: ");
+    Serial.println(CAPTURE_INTERVAL);
+    Serial.print("Threshold: ");
+    Serial.println(MOTION_THRESHOLD);
+    Serial.print("Webhook: ");
+    Serial.println(DISCORD_WEBHOOK);
   }
 
   void update()
   {
+    // Keeps WiFiManager internal processes running
     wm.process();
   }
 };
@@ -133,9 +147,9 @@ public:
   String webhook;
   bool messageSent = false;
 
-  void init(const String &webhookUrl)
+  void init()
   {
-    webhook = webhookUrl;
+    webhook = DISCORD_WEBHOOK;
   }
 
   void update()
@@ -149,6 +163,9 @@ public:
 
   void sendText(const String &content)
   {
+    if (WiFi.status() != WL_CONNECTED || webhook.length() == 0)
+    return;
+  
     HTTPClient http;
 
     http.begin(webhook);
@@ -169,62 +186,60 @@ public:
     }
 
     http.end();
+    delay(10);
   }
 
-  void sendImage(uint8_t *buf, size_t len)
+  void sendImage(uint8_t *buf, size_t len, const String &filenameSuffix = "")
   {
-    if (WiFi.status() != WL_CONNECTED)
-      return;
+    // Exit if not connected or webhook is not set
+    if (WiFi.status() != WL_CONNECTED || webhook.length() == 0) return;
 
     HTTPClient http;
-    String boundary = "----esp32formboundary"; // custom boundary for multipart request
+    String boundary = "----esp32formboundary";
 
-    http.begin(webhook);
-    http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+    // Generate filename with optional suffix
+    String filename = "photo_" + filenameSuffix + ".jpg";
 
-    // ---- Prepare multipart body ----
-    // "head" contains headers for the file upload
+    // Multipart head
     String head = "--" + boundary + "\r\n";
-    head += "Content-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\n";
+    head += "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n";
     head += "Content-Type: image/jpeg\r\n\r\n";
 
-    // "tail" closes the multipart message
+    // Multipart tail (closing boundary)
     String tail = "\r\n--" + boundary + "--\r\n";
 
-    // Calculate total body length
-    int totalLen = head.length() + len + tail.length();
+    // Calculate total length (head + image + tail)
+    size_t totalLen = head.length() + len + tail.length();
 
-    // Allocate buffer to hold the whole request body
-    uint8_t *body = (uint8_t *)malloc(totalLen);
+    // Allocate buffer for the whole body
+    uint8_t *body = (uint8_t*)heap_caps_malloc(totalLen, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (!body)
     {
-      Serial.println("Body malloc failed");
+      Serial.println("malloc failed");
       return;
     }
 
-    // Copy parts into the buffer: head + image + tail
+    // Copy parts into the buffer
     memcpy(body, head.c_str(), head.length());
     memcpy(body + head.length(), buf, len);
     memcpy(body + head.length() + len, tail.c_str(), tail.length());
-
-    // ---- Send POST request with binary data ----
+    // Perform HTTP POST with full body
+    http.begin(webhook);
+    http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     int code = http.POST(body, totalLen);
-
-    // Free the allocated memory after sending
+    // Free buffer
     free(body);
 
-    // ---- Print the result ----
-    if (code > 0)
-    {
+    // Debug result
+    if (code > 0) {
       Serial.printf("Image upload response code: %d\n", code);
-    }
-    else
-    {
-      Serial.print("Upload failed, error: ");
+    } else {
+      Serial.print("Upload failed: ");
       Serial.println(http.errorToString(code));
     }
 
     http.end();
+    delay(10);
   }
 };
 
@@ -272,19 +287,29 @@ private:
   bool hasReference = false;
   std::vector<uint8_t> reference;
   int blocksX, blocksY;
+  // rgb buffer
+  static uint8_t* rgb;
+  static size_t rgbSize;
 
   std::vector<uint8_t> compress(const camera_fb_t *fb)
   {
-    int pixelStep = 1;
-    // JPEG to RGB888
+    int pixelStep = PIXEL_CHECK; // increase for speed
     size_t out_len = fb->width * fb->height * 3;
-    uint8_t *rgb = (uint8_t*)heap_caps_malloc(out_len, MALLOC_CAP_8BIT);
-    if (!rgb) return {};
-    if (!fmt2rgb888(fb->buf, fb->len, fb->format, rgb))
+
+    // allocate once or resize if needed
+    if (!rgb || out_len > rgbSize)
     {
-      free(rgb);
+      if (rgb) free(rgb);
+      rgb = (uint8_t*)heap_caps_malloc(out_len, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+      rgbSize = out_len;
+    }
+    if (!rgb) return {};
+
+    // JPEG -> RGB888 into static buffer
+    if (!fmt2rgb888(fb->buf, fb->len, fb->format, rgb)) {
       return {};
     }
+
     // matrix of average brightness per block
     std::vector<uint8_t> blocks(blocksX * blocksY, 0);
     // block size in pixels
@@ -316,10 +341,9 @@ private:
           }
         }
         // save avg brightness of this block
-        blocks[by * blocksX + bx] = sum / pxCount;
+        blocks[by * blocksX + bx] = pxCount ? (sum / pxCount) : 0;
       }
 
-    free(rgb);
     return blocks;
   }
 
@@ -370,22 +394,34 @@ int motionCount = 0; // global counter
 // Motion detector
 MotionDetector detector;
 
+uint8_t* MotionDetector::rgb = nullptr;
+size_t MotionDetector::rgbSize = 0;
+
 void setup()
 {
   pinMode(0, INPUT_PULLUP); // on reset button allow to change settings
 
   wifi.init();
-  discord.init(wifi.getWebhook());
+  discord.init();
 
   initConfig();
   camera.init(config);
 
-  // Wi-Fi stabilize
-  while (WiFi.status() != WL_CONNECTED) 
+  // ---- Wait for Wi-Fi with timeout ----
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) // 20s timeout
   {
     delay(500);
     Serial.print(".");
-  } 
+  }
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("\nWi-Fi connect failed, starting config portal...");
+    wifi.wm.startConfigPortal("ESP32-Setup", "12345678");
+    ESP.restart(); // reboot after config
+    return; // safety guard
+  }
 
   if (!camera.initialized)
   {
@@ -441,7 +477,7 @@ void loop()
     String msg = "Motion detected! #" + String(motionCount);
     Serial.println(msg);
     discord.sendText(msg);
-    discord.sendImage(fb->buf, fb->len);
+    discord.sendImage(fb->buf, fb->len, String(motionCount));
   }
   // release frame buffer always
   camera.release(fb);
