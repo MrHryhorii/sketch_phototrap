@@ -67,11 +67,13 @@ public:
   WiFiManagerParameter webhookParam;
   WiFiManagerParameter intervalParam;
   WiFiManagerParameter thresholdParam;
+  WiFiManagerParameter pixelStepParam;
 
   WiFiModule()
   : webhookParam("webhook", "Discord Webhook URL", "", 256),
     intervalParam("interval", "Capture Interval (ms)", "1000", 10),
-    thresholdParam("threshold", "Motion Threshold", "3", 5)
+    thresholdParam("threshold", "Motion Threshold", "3", 5),
+    pixelStepParam("pixelstep", "Pixel Step (1=precise, >1=faster)", "1", 5)
   {}
 
   void init()
@@ -81,6 +83,7 @@ public:
     String savedWebhook  = prefs.getString("webhook", "");
     int savedInterval    = prefs.getInt("interval", 1000);
     int savedThreshold   = prefs.getInt("threshold", 3);
+    int savedPixelStep = prefs.getInt("pixelstep", 1);
     prefs.end();
 
     // Fill the portal fields with stored values
@@ -93,10 +96,14 @@ public:
     String sThreshold = String(savedThreshold);
     thresholdParam.setValue(sThreshold.c_str(), sThreshold.length());
 
+    String sPixel = String(savedPixelStep);
+    pixelStepParam.setValue(sPixel.c_str(), sPixel.length());
+
     // Add parameters to WiFiManager portal
     wm.addParameter(&webhookParam);
     wm.addParameter(&intervalParam);
     wm.addParameter(&thresholdParam);
+    wm.addParameter(&pixelStepParam);
 
     // ---- Try Wi-Fi connection or start AP portal ----
     if (!wm.autoConnect("ESP32-Setup", "12345678"))
@@ -110,27 +117,32 @@ public:
     prefs.putString("webhook", webhookParam.getValue());
     prefs.putInt("interval", String(intervalParam.getValue()).toInt());
     prefs.putInt("threshold", String(thresholdParam.getValue()).toInt());
+    prefs.putInt("pixelstep", String(pixelStepParam.getValue()).toInt());
     prefs.end();
 
     // ---- Update global variables ----
+    DISCORD_WEBHOOK  = String(webhookParam.getValue());
     CAPTURE_INTERVAL = String(intervalParam.getValue()).toInt();
     MOTION_THRESHOLD = String(thresholdParam.getValue()).toInt();
-    DISCORD_WEBHOOK  = String(webhookParam.getValue());
+    PIXEL_CHECK = String(pixelStepParam.getValue()).toInt();
 
     // ---- Sanity checks ----
     if (CAPTURE_INTERVAL < 100) CAPTURE_INTERVAL = 100;   // prevent zero or too small interval
     if (MOTION_THRESHOLD < 1)   MOTION_THRESHOLD = 1;     // prevent zero threshold
+    if (PIXEL_CHECK < 1)        PIXEL_CHECK = 1;          // prevent below 1
 
     // ---- Debug info ----
     Serial.println("Connected to Wi-Fi!");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    Serial.print("Webhook: ");
+    Serial.println(DISCORD_WEBHOOK);
     Serial.print("Interval: ");
     Serial.println(CAPTURE_INTERVAL);
     Serial.print("Threshold: ");
     Serial.println(MOTION_THRESHOLD);
-    Serial.print("Webhook: ");
-    Serial.println(DISCORD_WEBHOOK);
+    Serial.print("Pixel Step: ");
+    Serial.println(PIXEL_CHECK);
   }
 
   void update()
