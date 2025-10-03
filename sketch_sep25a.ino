@@ -12,6 +12,8 @@
 unsigned long CAPTURE_INTERVAL = 1000;  // ms between captures
 uint32_t MOTION_THRESHOLD = 3;          // motion sensitivity threshold
 int PIXEL_CHECK = 1;                    // how many pixels check per line in a block (1 - minimum; bigger = faster)
+int BLOCKS_X = 12;                      // number of width check cells
+int BLOCKS_Y = 8;                       // number of height check cells
 // Discord
 String DISCORD_WEBHOOK = "";            // Discord webhook URL
 
@@ -68,12 +70,16 @@ public:
   WiFiManagerParameter intervalParam;
   WiFiManagerParameter thresholdParam;
   WiFiManagerParameter pixelStepParam;
+  WiFiManagerParameter blocksXParam;
+  WiFiManagerParameter blocksYParam;
 
   WiFiModule()
   : webhookParam("webhook", "Discord Webhook URL", "", 256),
     intervalParam("interval", "Capture Interval (ms)", "1000", 10),
     thresholdParam("threshold", "Motion Threshold", "3", 5),
-    pixelStepParam("pixelstep", "Pixel Step (1=precise, >1=faster)", "1", 5)
+    pixelStepParam("pixelstep", "Pixel Step (1=precise, >1=faster)", "1", 5),
+    blocksXParam("blocksX", "Blocks X (more = precise)", "12", 5),
+    blocksYParam("blocksY", "Blocks Y (more = precise)", "8", 5)
   {}
 
   void init()
@@ -83,7 +89,9 @@ public:
     String savedWebhook  = prefs.getString("webhook", "");
     int savedInterval    = prefs.getInt("interval", 1000);
     int savedThreshold   = prefs.getInt("threshold", 3);
-    int savedPixelStep = prefs.getInt("pixelstep", 1);
+    int savedPixelStep   = prefs.getInt("pixelstep", 1);
+    int savedBlocksX     = prefs.getInt("blocksX", 12);
+    int savedBlocksY     = prefs.getInt("blocksY", 8);
     prefs.end();
 
     // Fill the portal fields with stored values
@@ -99,11 +107,19 @@ public:
     String sPixel = String(savedPixelStep);
     pixelStepParam.setValue(sPixel.c_str(), sPixel.length());
 
+    String sBlocksX = String(savedBlocksX);
+    blocksXParam.setValue(sBlocksX.c_str(), sBlocksX.length());
+
+    String sBlocksY = String(savedBlocksY);
+    blocksYParam.setValue(sBlocksY.c_str(), sBlocksY.length());
+
     // Add parameters to WiFiManager portal
     wm.addParameter(&webhookParam);
     wm.addParameter(&intervalParam);
     wm.addParameter(&thresholdParam);
     wm.addParameter(&pixelStepParam);
+    wm.addParameter(&blocksXParam);
+    wm.addParameter(&blocksYParam);
 
     // ---- Try Wi-Fi connection or start AP portal ----
     if (!wm.autoConnect("ESP32-Setup", "12345678"))
@@ -118,18 +134,24 @@ public:
     prefs.putInt("interval", String(intervalParam.getValue()).toInt());
     prefs.putInt("threshold", String(thresholdParam.getValue()).toInt());
     prefs.putInt("pixelstep", String(pixelStepParam.getValue()).toInt());
+    prefs.putInt("blocksX", String(blocksXParam.getValue()).toInt());
+    prefs.putInt("blocksY", String(blocksYParam.getValue()).toInt());
     prefs.end();
 
     // ---- Update global variables ----
     DISCORD_WEBHOOK  = String(webhookParam.getValue());
     CAPTURE_INTERVAL = String(intervalParam.getValue()).toInt();
     MOTION_THRESHOLD = String(thresholdParam.getValue()).toInt();
-    PIXEL_CHECK = String(pixelStepParam.getValue()).toInt();
+    PIXEL_CHECK      = String(pixelStepParam.getValue()).toInt();
+    BLOCKS_X         = String(blocksXParam.getValue()).toInt();
+    BLOCKS_Y         = String(blocksYParam.getValue()).toInt();
 
     // ---- Sanity checks ----
     if (CAPTURE_INTERVAL < 100) CAPTURE_INTERVAL = 100;   // prevent zero or too small interval
     if (MOTION_THRESHOLD < 1)   MOTION_THRESHOLD = 1;     // prevent zero threshold
     if (PIXEL_CHECK < 1)        PIXEL_CHECK = 1;          // prevent below 1
+    if (BLOCKS_X < 1)           BLOCKS_X = 1;             // prevent below 1
+    if (BLOCKS_Y < 1)           BLOCKS_Y = 1;             // prevent below 1
 
     // ---- Debug info ----
     Serial.println("Connected to Wi-Fi!");
@@ -143,6 +165,10 @@ public:
     Serial.println(MOTION_THRESHOLD);
     Serial.print("Pixel Step: ");
     Serial.println(PIXEL_CHECK);
+    Serial.print("Blocks X: ");
+    Serial.println(BLOCKS_X);
+    Serial.print("Blocks Y: ");
+    Serial.println(BLOCKS_Y);
   }
 
   void update()
@@ -360,12 +386,15 @@ private:
   }
 
 public:
-  MotionDetector(int bx = 12, int by = 8) : blocksX(bx), blocksY(by) {}
+  MotionDetector() : blocksX(12), blocksY(8) {}
 
   void init(const camera_fb_t *fb)
   {
     reference = compress(fb);
     hasReference = !reference.empty();
+
+    blocksX = BLOCKS_X;
+    blocksY = BLOCKS_Y;
   }
 
   bool compare(const camera_fb_t *fb, uint32_t threshold)
