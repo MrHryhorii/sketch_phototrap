@@ -11,7 +11,7 @@
 // Timing and threshold
 unsigned long CAPTURE_INTERVAL = 1000;  // ms between captures
 uint32_t MOTION_THRESHOLD = 3;          // motion sensitivity threshold
-int PIXEL_CHECK = 1;                    // how many pixels check per line in a block (1 - minimum; bigger = faster)
+int PIXEL_CHECK = 1;                    // how many pixels check per line in a block (1 - minimum; bigger = faster); 4 works good
 int BLOCKS_X = 12;                      // number of width check cells
 int BLOCKS_Y = 8;                       // number of height check cells
 // Discord
@@ -77,9 +77,9 @@ public:
   : webhookParam("webhook", "Discord Webhook URL", "", 256),
     intervalParam("interval", "Capture Interval (ms)", "1000", 10),
     thresholdParam("threshold", "Motion Threshold", "3", 5),
-    pixelStepParam("pixelstep", "Pixel Step (1=precise, >1=faster)", "1", 5),
-    blocksXParam("blocksX", "Blocks X (more = precise)", "12", 5),
-    blocksYParam("blocksY", "Blocks Y (more = precise)", "8", 5)
+    pixelStepParam("pixelstep", "Pixel Step (1=precise, >1=faster)", "1", 3),
+    blocksXParam("blocksX", "Blocks X (more = precise)", "12", 3),
+    blocksYParam("blocksY", "Blocks Y (more = precise)", "8", 3)
   {}
 
   void init()
@@ -96,22 +96,22 @@ public:
 
     // Fill the portal fields with stored values
     if (savedWebhook.length() > 0)
-      webhookParam.setValue(savedWebhook.c_str(), savedWebhook.length());
+      webhookParam.setValue(savedWebhook.c_str(), 256);
 
     String sInterval = String(savedInterval);
-    intervalParam.setValue(sInterval.c_str(), sInterval.length());
+    intervalParam.setValue(sInterval.c_str(), 10);
 
     String sThreshold = String(savedThreshold);
-    thresholdParam.setValue(sThreshold.c_str(), sThreshold.length());
+    thresholdParam.setValue(sThreshold.c_str(), 5);
 
     String sPixel = String(savedPixelStep);
-    pixelStepParam.setValue(sPixel.c_str(), sPixel.length());
+    pixelStepParam.setValue(sPixel.c_str(), 3);
 
     String sBlocksX = String(savedBlocksX);
-    blocksXParam.setValue(sBlocksX.c_str(), sBlocksX.length());
+    blocksXParam.setValue(sBlocksX.c_str(), 3);
 
     String sBlocksY = String(savedBlocksY);
-    blocksYParam.setValue(sBlocksY.c_str(), sBlocksY.length());
+    blocksYParam.setValue(sBlocksY.c_str(), 3);
 
     // Add parameters to WiFiManager portal
     wm.addParameter(&webhookParam);
@@ -175,21 +175,6 @@ public:
   {
     // Keeps WiFiManager internal processes running
     wm.process();
-  }
-
-  void isBootPressedAfterReset()
-  {
-    // Wait 3 seconds after power-up
-    Serial.println("Waiting 3s for setup button...");
-    delay(3000);
-    // If BOOT button is still pressed then open config portal
-    if (digitalRead(0) == LOW)
-    {
-      wm.setBreakAfterConfig(true);
-      wm.startConfigPortal("ESP32-Setup", "12345678");
-      persistAndApply();
-      ESP.restart();
-    }
   }
 
   // Get and Set
@@ -482,7 +467,6 @@ void setup()
   // Wi-fi
   initConfig();
   wifi.init();
-  wifi.isBootPressedAfterReset();
   // Camera and Discord
   camera.init(config);
   discord.init();
@@ -503,7 +487,8 @@ void setup()
     return; // safety guard
   }
 
-  String msgConfig =  "CAPTURE INTERVAL: " + String(CAPTURE_INTERVAL) + 
+  // send message about config
+  String msgConfig =  "CAPTURE INTERVAL: " + String(CAPTURE_INTERVAL) + "ms" + 
                       ", MOTION THRESHOLD: " + String(MOTION_THRESHOLD) + 
                       ", PIXEL CHECK: " + String(PIXEL_CHECK) +
                       ", CHECK GRID: " + String(BLOCKS_X) + " * " + String(BLOCKS_Y) ;
@@ -537,26 +522,47 @@ void setup()
 
 void loop()
 {
+  // --- Long press to open config mode ---
+  if (digitalRead(0) == LOW)          // button pressed
+  {
+    delay(1000);                      // wait time (ms)
+    if (digitalRead(0) == LOW)        // still pressed after 1s?
+    {     
+      wifi.wm.setBreakAfterConfig(true);
+      wifi.wm.startConfigPortal("ESP32-Setup", "12345678");
+      wifi.persistAndApply();         // updata config
+      ESP.restart();
+      return;
+    }
+  }
+
   // --- Update modules ---
   wifi.update();
   discord.update();
 
   // --- Timing for capture ---
-  if (millis() - lastCapture < CAPTURE_INTERVAL) return;
+  if (millis() - lastCapture < CAPTURE_INTERVAL)
+  {
+    delay(1);
+    return;
+  }
   lastCapture = millis();
+
   // --- Capture frame ---
   camera_fb_t *fb = camera.capture();
   if (!fb) return;
+
   // --- Motion detection ---
   bool motion = detector.compare(fb, MOTION_THRESHOLD);
   if (motion)
   {
     motionCount++;
     String msg = "Motion detected! #" + String(motionCount);
-    Serial.println(msg);
-    discord.sendText(msg);
-    discord.sendImage(fb->buf, fb->len, String(motionCount));
+                  Serial.println(msg);
+                  discord.sendText(msg);
+                  discord.sendImage(fb->buf, fb->len, String(motionCount));
   }
+
   // release frame buffer always
   camera.release(fb);
 }
