@@ -176,6 +176,43 @@ public:
     // Keeps WiFiManager internal processes running
     wm.process();
   }
+
+  void isBootPressedAfterReset()
+  {
+    // Wait 3 seconds after power-up
+    Serial.println("Waiting 3s for setup button...");
+    delay(3000);
+    // If BOOT button is still pressed then open config portal
+    if (digitalRead(0) == LOW)
+    {
+      wm.setBreakAfterConfig(true);
+      wm.startConfigPortal("ESP32-Setup", "12345678");
+      persistAndApply();
+      ESP.restart();
+    }
+  }
+
+  // Get and Set
+  void persistAndApply() 
+  {
+    // persist
+    prefs.begin("config", false);
+    prefs.putString("webhook",   webhookParam.getValue());
+    prefs.putInt("interval",     String(intervalParam.getValue()).toInt());
+    prefs.putInt("threshold",    String(thresholdParam.getValue()).toInt());
+    prefs.putInt("pixelstep",    String(pixelStepParam.getValue()).toInt());
+    prefs.putInt("blocksX",      String(blocksXParam.getValue()).toInt());
+    prefs.putInt("blocksY",      String(blocksYParam.getValue()).toInt());
+    prefs.end();
+    // apply
+    DISCORD_WEBHOOK  = String(webhookParam.getValue());
+    CAPTURE_INTERVAL = String(intervalParam.getValue()).toInt();
+    MOTION_THRESHOLD = String(thresholdParam.getValue()).toInt();
+    PIXEL_CHECK      = String(pixelStepParam.getValue()).toInt();
+    BLOCKS_X         = String(blocksXParam.getValue()).toInt();
+    BLOCKS_Y         = String(blocksYParam.getValue()).toInt();
+  }
+
 };
 
 // ================== Discord Module ==================
@@ -442,11 +479,13 @@ void setup()
 {
   pinMode(0, INPUT_PULLUP); // on reset button allow to change settings
 
-  wifi.init();
-  discord.init();
-
+  // Wi-fi
   initConfig();
+  wifi.init();
+  wifi.isBootPressedAfterReset();
+  // Camera and Discord
   camera.init(config);
+  discord.init();
 
   // ---- Wait for Wi-Fi with timeout ----
   unsigned long startAttempt = millis();
@@ -463,6 +502,12 @@ void setup()
     ESP.restart(); // reboot after config
     return; // safety guard
   }
+
+  String msgConfig =  "CAPTURE INTERVAL: " + String(CAPTURE_INTERVAL) + 
+                      ", MOTION THRESHOLD: " + String(MOTION_THRESHOLD) + 
+                      ", PIXEL CHECK: " + String(PIXEL_CHECK) +
+                      ", CHECK GRID: " + String(BLOCKS_X) + " * " + String(BLOCKS_Y) ;
+  discord.sendText(msgConfig);
 
   if (!camera.initialized)
   {
@@ -495,14 +540,6 @@ void loop()
   // --- Update modules ---
   wifi.update();
   discord.update();
-
-  // --- Set Up mode ---
-  if (digitalRead(0) == LOW)
-  {
-    Serial.println("Button pressed!");
-    wifi.wm.startConfigPortal("ESP32-Setup", "12345678");
-    ESP.restart();
-  }
 
   // --- Timing for capture ---
   if (millis() - lastCapture < CAPTURE_INTERVAL) return;
